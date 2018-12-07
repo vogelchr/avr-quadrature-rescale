@@ -18,17 +18,30 @@
  *               +---------------+
  */
 
-/* table to decode the quadrature input, delta depending on last/curr state */
-const signed char quad_state_tbl[16] PROGMEM = {
-	[0b0001]=+1, /* from [..] -> [.H] */
-	[0b0111]=+1, /* from [.H] -> [HH] */
-	[0b1110]=+1, /* from [HH] -> [H.] */
-	[0b1000]=+1, /* from [H.] -> [..] */
+/*
+ *  Gray encoding of counter cnt:
+ *    gray = (bin & 0x03) ^ (0x01 & (bin >> 1))
+ *  
+ *  Cnt  bin  gray
+ *  ---:-----:----
+ *   0 : 0 0 : 0 0
+ *   1 : 0 1 : 0 1
+ *   2 : 1 0 : 1 1
+ *   3 : 1 1 : 1 0
+ */
 
-	[0b0010]=-1, /* from [..] -> [H.] */
-	[0b1011]=-1, /* from [H.] -> [HH] */
-	[0b1101]=-1, /* from [HH] -> [.H] */
-	[0b0100]=-1, /* from [.H] -> [..] */
+
+const signed char quad_state_tbl[16] PROGMEM = {
+	/* index is (old_bin << 2) | new_quadrature */
+	[0b0001]=+1, /* from [..] 0 -> [.H] 1 */
+	[0b0111]=+1, /* from [.H] 1 -> [HH] 2 */
+	[0b1010]=+1, /* from [HH] 2 -> [H.] 3 */
+	[0b1100]=+1, /* from [H.] 3 -> [..] 0 */
+
+	[0b0010]=-1, /* from [..] 0 -> [H.] 3 */
+	[0b1111]=-1, /* from [H.] 3 -> [HH] 2 */
+	[0b1001]=-1, /* from [HH] 2 -> [.H] 1 */
+	[0b0100]=-1, /* from [.H] 1 -> [..] 0 */
 };
 
 #define DDR_QOUT DDRB
@@ -124,11 +137,12 @@ ISR(TIMER1_OVF1_vect) {
 }
 
 static unsigned char
-quadrature_encode(unsigned char ctr) {
-	return (ctr & 0x03) ^ ((ctr & 0x02) >> 1);
+bin_to_gray(unsigned char ctr)
+{
+	return (ctr & 0x03) ^ (0x01 & (ctr >> 1));
 }
 
-static unsigned char quad_last;
+/* static unsigned char quad_last; */
 static uint16_t quad_ctr=1; /* don't start at the ffff -> 0000 wraparound! */
 
 static void
@@ -136,20 +150,36 @@ process_quadrature() {
 	signed char s;
 	unsigned char q=0;
 
+	set_led1(quad_ctr & 0x01);
+	set_led2(quad_ctr & 0x02);
+
 	q = read_quad_input();
-	if (q == quad_last)
-		return;
-
-	s = pgm_read_byte(&quad_state_tbl[(quad_last << 2) | q]);
-	quad_last = q;
-
+	s = pgm_read_byte(&quad_state_tbl[((quad_ctr & 0x03) << 2) | q]);
 	quad_ctr += s;
 
-	q = quadrature_encode(quad_ctr >> 2);
+	/*
+	 * The detents are around the 0 mark of the input encoding, hence
+	 * we don't want to change the quadrature output when changing
+	 * from 0..3, because that would be right on the edge of the detent.
+	 * If we output (ctr+1)>>2, that's more towards the middle between
+	 * detents.
+	 *
+	 *  detent
+	 *   |                       |                       |
+	 *   V                       V                       V
+	 *  
+	 *   0 --- 1 --- 2 --- 3 --- 4 --- 5 --- 6 --- 7 --- 8 ctr from quad input
+	 *   0 --- 0 --- 0 --- 0 --- 1 --- 1 --- 1 --- 1 --- 2 
+	 *                        ^                       ^   <--- ctr >> 2
+	 *
+	 *   1 --- 2 --- 3 --- 4 --- 5 --- 6 --- 7 --- 8 --- 9 ctr + 1
+	 *   0 --- 0 --- 0 --- 1 --- 1 --- 1 --- 1 --- 2 --- 2
+	 *                  ^                       ^         <--- ctr+1 >> 2
+	 *
+	 */
+	q = bin_to_gray((quad_ctr+1) >> 2);
 	write_quad_output(q);
 
-	set_led1(q & 0x01);
-	set_led2(q & 0x02);
 }
 
 int
@@ -183,10 +213,7 @@ main() {
 
 	sei(); /* enable interrupts */
 
-	/* initialize quadrature decoder, encoder output */
-	quad_last = read_quad_input();
-	write_quad_output(0);
-
+	quad_ctr = bin_to_gray(read_quad_input());
 	while (1)
 		process_quadrature();
 }
